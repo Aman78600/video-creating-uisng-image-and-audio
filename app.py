@@ -9,20 +9,6 @@ import numpy as np
 from io import BytesIO
 import time
 
-# Check if required packages are installed, if not, install them
-try:
-    import moviepy.editor as mpy
-except ImportError:
-    st.error("MoviePy not found. Please install it with: pip install moviepy")
-    st.stop()
-
-try:
-    from pydub import AudioSegment
-    from pydub.effects import normalize
-except ImportError:
-    st.error("Pydub not found. Please install it with: pip install pydub")
-    st.stop()
-
 # Set page configuration
 st.set_page_config(
     page_title="Offline Video Creator",
@@ -60,18 +46,16 @@ with st.sidebar:
     st.header("Settings")
     
     # Transition effects
-    transition_options = ["None", "Fade", "Slide", "Zoom"]
+    transition_options = ["None", "Fade", "Slide"]
     selected_transition = st.selectbox("Transition Effect", transition_options)
     
-    # Video templates
-    template_options = ["Slideshow", "Single Image", "Ken Burns Effect"]
-    selected_template = st.selectbox("Video Template", template_options)
+    # Image duration
+    image_duration = st.slider("Image Duration (seconds)", 2, 10, 5)
     
     # Image editing options
     st.subheader("Image Editing")
     brightness = st.slider("Brightness", 0.5, 1.5, 1.0)
     contrast = st.slider("Contrast", 0.5, 1.5, 1.0)
-    saturation = st.slider("Saturation", 0.5, 1.5, 1.0)
 
 # Main content area
 tab1, tab2, tab3 = st.tabs(["Upload Media", "Edit & Process", "Preview & Export"])
@@ -98,37 +82,19 @@ with tab1:
     # Audio upload
     uploaded_audio = st.file_uploader(
         "Upload Audio File", 
-        type=["mp3", "wav", "ogg", "m4a"]
+        type=["mp3", "wav", "ogg"]
     )
     
     # Display audio info if uploaded
     if uploaded_audio:
         st.subheader("Audio File")
         st.audio(uploaded_audio)
-        
-        # Load audio to get duration
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_audio:
-            tmp_audio.write(uploaded_audio.read())
-            audio_path = tmp_audio.name
-        
-        try:
-            audio = AudioSegment.from_file(audio_path)
-            duration = len(audio) / 1000  # Convert to seconds
-            st.info(f"Audio duration: {duration:.2f} seconds")
-            
-            # Audio trimming sliders
-            st.subheader("Audio Trimming")
-            start_time = st.slider("Start Time (seconds)", 0.0, duration, 0.0)
-            end_time = st.slider("End Time (seconds)", 0.0, duration, duration)
-            
-        except Exception as e:
-            st.error(f"Error loading audio: {e}")
 
 with tab2:
     st.header("Edit & Process")
     
-    if not uploaded_images or not uploaded_audio:
-        st.warning("Please upload both images and audio to continue.")
+    if not uploaded_images:
+        st.warning("Please upload images to continue.")
     else:
         # Process images with editing options
         processed_images = []
@@ -144,8 +110,8 @@ with tab2:
                 enhancer = ImageEnhance.Contrast(img)
                 img = enhancer.enhance(contrast)
                 
-                enhancer = ImageEnhance.Color(img)
-                img = enhancer.enhance(saturation)
+                # Resize images to consistent size
+                img = img.resize((1280, 720))
                 
                 # Save processed image
                 processed_path = os.path.join(temp_dir, f"processed_{idx}.jpg")
@@ -154,36 +120,13 @@ with tab2:
         
         st.success(f"Processed {len(processed_images)} images!")
         
-        # Audio enhancement section
-        st.subheader("Audio Enhancement")
-        
-        if st.button("Improve Audio Quality", type="secondary"):
-            with st.spinner("Enhancing audio quality..."):
-                try:
-                    # Load audio
-                    audio = AudioSegment.from_file(audio_path)
-                    
-                    # Trim audio if needed
-                    if start_time > 0 or end_time < duration:
-                        start_ms = int(start_time * 1000)
-                        end_ms = int(end_time * 1000)
-                        audio = audio[start_ms:end_ms]
-                    
-                    # Normalize audio
-                    audio = normalize(audio)
-                    
-                    # Simple noise reduction (basic high-pass filter)
-                    audio = audio.high_pass_filter(100)
-                    
-                    # Export enhanced audio
-                    enhanced_audio_path = os.path.join(temp_dir, "enhanced_audio.wav")
-                    audio.export(enhanced_audio_path, format="wav")
-                    
-                    st.success("Audio enhanced successfully!")
-                    st.audio(enhanced_audio_path)
-                    
-                except Exception as e:
-                    st.error(f"Error enhancing audio: {e}")
+        # Save audio file if uploaded
+        audio_path = None
+        if uploaded_audio:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_audio:
+                tmp_audio.write(uploaded_audio.read())
+                audio_path = tmp_audio.name
+            st.success("Audio file processed!")
         
         # Video generation
         st.subheader("Generate Video")
@@ -191,47 +134,64 @@ with tab2:
         if st.button("Create Video", type="primary"):
             with st.spinner("Creating video..."):
                 try:
-                    # Use enhanced audio if available, otherwise original
-                    final_audio_path = enhanced_audio_path if 'enhanced_audio_path' in locals() and os.path.exists(enhanced_audio_path) else audio_path
+                    # Create a text file with image paths and durations
+                    concat_file = os.path.join(temp_dir, "input.txt")
+                    with open(concat_file, "w") as f:
+                        for img_path in processed_images:
+                            f.write(f"file '{img_path}'\n")
+                            f.write(f"duration {image_duration}\n")
                     
-                    # Calculate duration per image
-                    audio = AudioSegment.from_file(final_audio_path)
-                    audio_duration = len(audio) / 1000
-                    duration_per_image = audio_duration / len(processed_images)
+                    # Create video from images
+                    temp_video_path = os.path.join(temp_dir, "temp_video.mp4")
                     
-                    # Create video clips
-                    clips = []
-                    for img_path in processed_images:
-                        clip = mpy.ImageClip(img_path).set_duration(duration_per_image)
-                        
-                        # Apply transitions based on selection
-                        if selected_transition == "Fade":
-                            clip = clip.crossfadein(1).crossfadeout(1)
-                        elif selected_transition == "Slide":
-                            # Simple slide effect
-                            clip = clip.set_position(lambda t: (int(t*10), 0))
-                        elif selected_transition == "Zoom":
-                            # Simple zoom effect
-                            clip = clip.resize(lambda t: 1 + 0.1 * t)
-                        
-                        clips.append(clip)
+                    # Build FFmpeg command
+                    cmd = [
+                        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                        "-i", concat_file,
+                        "-vf", "fps=30,format=yuv420p",
+                        "-c:v", "libx264", "-preset", "medium",
+                        temp_video_path
+                    ]
                     
-                    # Concatenate clips
-                    video = mpy.concatenate_videoclips(clips, method="compose")
+                    # Run FFmpeg
+                    result = subprocess.run(cmd, capture_output=True, text=True)
                     
-                    # Set audio
-                    video = video.set_audio(mpy.AudioFileClip(final_audio_path))
+                    if result.returncode != 0:
+                        st.error(f"FFmpeg error: {result.stderr}")
+                        st.stop()
                     
-                    # Export video
+                    # Add audio if provided
                     output_path = os.path.join(temp_dir, "output_video.mp4")
-                    video.write_videofile(
-                        output_path, 
-                        fps=24, 
-                        codec="libx264", 
-                        audio_codec="aac",
-                        verbose=False,
-                        logger=None
-                    )
+                    
+                    if audio_path:
+                        # Get audio duration
+                        cmd = [
+                            "ffmpeg", "-i", audio_path
+                        ]
+                        result = subprocess.run(cmd, capture_output=True, text=True)
+                        
+                        # Add audio to video
+                        cmd = [
+                            "ffmpeg", "-y",
+                            "-i", temp_video_path,
+                            "-i", audio_path,
+                            "-c:v", "copy", "-c:a", "aac", "-shortest",
+                            output_path
+                        ]
+                    else:
+                        # Copy video without audio
+                        cmd = [
+                            "ffmpeg", "-y",
+                            "-i", temp_video_path,
+                            "-c", "copy",
+                            output_path
+                        ]
+                    
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    
+                    if result.returncode != 0:
+                        st.error(f"FFmpeg error: {result.stderr}")
+                        st.stop()
                     
                     st.session_state.video_path = output_path
                     st.success("Video created successfully!")
