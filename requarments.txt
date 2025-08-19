@@ -8,4 +8,6 @@ numpy
 decorator 
 ffmpeg
 tqdm 
+ffmpeg-python
+imageio-ffmpeg
 proglog
