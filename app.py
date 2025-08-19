@@ -7,6 +7,8 @@ import io
 import base64
 from PIL import Image
 import wave
+import threading
+import time
 
 # Set page config
 st.set_page_config(
@@ -24,6 +26,22 @@ def check_ffmpeg():
     except:
         return False
 
+def get_audio_duration(audio_path):
+    """Get audio duration in seconds"""
+    try:
+        cmd = [
+            'ffprobe', '-v', 'error', '-select_streams', 'a:0',
+            '-show_entries', 'format=duration', 
+            '-of', 'csv=p=0', audio_path
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            return float(result.stdout.strip())
+    except:
+        pass
+    return None
+
 def enhance_audio_basic(audio_file_path, output_path):
     """Basic audio enhancement using ffmpeg"""
     try:
@@ -35,7 +53,7 @@ def enhance_audio_basic(audio_file_path, output_path):
             '-y', output_path
         ]
         
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         
         if result.returncode != 0:
             st.error(f"FFmpeg audio error: {result.stderr}")
@@ -46,27 +64,13 @@ def enhance_audio_basic(audio_file_path, output_path):
         st.error(f"Audio enhancement failed: {str(e)}")
         return False
 
-def create_video_ffmpeg(image_path, audio_path, output_path):
+def create_video_ffmpeg(image_path, audio_path, output_path, timeout=None):
     """Create video using ffmpeg with proper dimension and codec handling"""
     try:
-        # First, try to get audio duration
-        duration_cmd = [
-            'ffprobe', '-v', 'error', '-select_streams', 'a:0',
-            '-show_entries', 'format=duration', 
-            '-of', 'csv=p=0', audio_path
-        ]
-        
-        duration_result = subprocess.run(duration_cmd, capture_output=True, text=True, timeout=30)
-        
-        if duration_result.returncode != 0:
-            st.warning("Could not determine audio duration, using default approach")
-            duration = None
-        else:
-            try:
-                duration = float(duration_result.stdout.strip())
-                st.info(f"Audio duration: {duration:.2f} seconds")
-            except:
-                duration = None
+        # Get audio duration for progress tracking
+        duration = get_audio_duration(audio_path)
+        if duration:
+            st.info(f"Processing audio: {duration:.2f} seconds")
         
         # Fixed command that addresses the issues found in the error log:
         # 1. Uses video filter to ensure even dimensions
@@ -88,66 +92,117 @@ def create_video_ffmpeg(image_path, audio_path, output_path):
         ]
         
         st.info("Running FFmpeg command with dimension fix...")
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         
-        if result.returncode == 0:
+        # Use Popen for better timeout control
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        
+        # Wait for process to complete with timeout
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+            st.error(f"FFmpeg process timed out after {timeout} seconds")
+            return False
+        
+        if process.returncode == 0:
             if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 return True
             else:
                 st.error("Video file was not created or is empty")
                 return False
         else:
-            st.error(f"FFmpeg failed with return code {result.returncode}")
-            st.error(f"Error output: {result.stderr}")
+            st.error(f"FFmpeg failed with return code {process.returncode}")
+            st.error(f"Error output: {stderr}")
+            return False
+        
+    except Exception as e:
+        st.error(f"Video creation failed: {str(e)}")
+        return False
+
+def create_video_in_chunks(image_path, audio_path, output_path, chunk_duration=600):
+    """Create video by processing audio in chunks to avoid timeout issues"""
+    try:
+        # Get total audio duration
+        total_duration = get_audio_duration(audio_path)
+        if not total_duration:
+            st.error("Could not determine audio duration")
+            return False
+        
+        st.info(f"Processing long audio ({total_duration:.2f}s) in chunks...")
+        
+        # Create temporary directory for chunks
+        temp_dir = tempfile.mkdtemp()
+        video_chunks = []
+        
+        # Calculate number of chunks
+        num_chunks = int(total_duration // chunk_duration) + 1
+        
+        # Process each chunk
+        for i in range(num_chunks):
+            start_time = i * chunk_duration
+            chunk_output = os.path.join(temp_dir, f"chunk_{i}.mp4")
             
-            # Try alternative approach with different scaling
-            st.info("Trying alternative scaling approach...")
-            alt_cmd = [
+            # Create chunk
+            cmd = [
                 'ffmpeg', '-y',
                 '-loop', '1', '-i', image_path,
                 '-i', audio_path,
                 '-c:v', 'libx264',
                 '-c:a', 'aac',
-                '-vf', 'scale=960:1064',  # Force specific even dimensions
+                '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
                 '-pix_fmt', 'yuv420p',
                 '-ar', '44100',
-                '-ac', '2',  # Force stereo
                 '-b:a', '128k',
-                '-shortest',
-                output_path
+                '-ss', str(start_time),
+                '-t', str(chunk_duration),
+                '-movflags', '+faststart',
+                chunk_output
             ]
             
-            alt_result = subprocess.run(alt_cmd, capture_output=True, text=True, timeout=180)
+            st.info(f"Processing chunk {i+1}/{num_chunks}...")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             
-            if alt_result.returncode == 0 and os.path.exists(output_path):
-                return True
-            else:
-                st.error(f"Alternative approach also failed: {alt_result.stderr}")
+            if result.returncode != 0:
+                st.error(f"Chunk {i+1} failed: {result.stderr}")
                 return False
+                
+            video_chunks.append(chunk_output)
         
-    except subprocess.TimeoutExpired:
-        st.error("Video creation timed out. Try with a shorter audio file.")
-        return False
-    except Exception as e:
-        st.error(f"Video creation failed: {str(e)}")
-        return False
-
-def fallback_audio_enhancement(input_file, output_file):
-    """Fallback audio enhancement without external libraries"""
-    try:
-        # Simple copy with basic normalization using ffmpeg
-        cmd = [
-            'ffmpeg', '-i', input_file,
-            '-filter:a', 'dynaudnorm',
-            '-y', output_file
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        return result.returncode == 0
-    except:
-        # If all else fails, just copy the file
+        # Concatenate all chunks
+        if len(video_chunks) > 1:
+            # Create file list for concatenation
+            list_file = os.path.join(temp_dir, "file_list.txt")
+            with open(list_file, 'w') as f:
+                for chunk in video_chunks:
+                    f.write(f"file '{chunk}'\n")
+            
+            # Concatenate videos
+            cmd = [
+                'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+                '-i', list_file, '-c', 'copy', output_path
+            ]
+            
+            st.info("Combining chunks...")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            
+            if result.returncode != 0:
+                st.error(f"Concatenation failed: {result.stderr}")
+                return False
+        else:
+            # Only one chunk, just copy it
+            import shutil
+            shutil.copy2(video_chunks[0], output_path)
+        
+        # Clean up temp directory
         import shutil
-        shutil.copy2(input_file, output_file)
-        return True
+        shutil.rmtree(temp_dir)
+        
+        return os.path.exists(output_path)
+        
+    except Exception as e:
+        st.error(f"Chunked processing failed: {str(e)}")
+        return False
 
 def main():
     st.title("🎬 Image + Audio to Video Maker")
@@ -191,6 +246,11 @@ def main():
     if image_file is not None and audio_file is not None:
         st.markdown("---")
         
+        # Add advanced options
+        with st.expander("Advanced Options"):
+            chunk_processing = st.checkbox("Enable chunked processing for long audio", value=True)
+            chunk_size = st.slider("Chunk size (minutes)", min_value=5, max_value=60, value=10)
+        
         if st.button("🎬 Make Video", type="primary", use_container_width=True):
             progress_bar = st.progress(0)
             status_text = st.empty()
@@ -227,31 +287,56 @@ def main():
                 st.info(f"Image: {os.path.getsize(temp_img_path)/1024:.1f} KB")
                 st.info(f"Audio: {os.path.getsize(enhanced_audio_path)/1024:.1f} KB")
                 
-                # Create video with multiple attempts
+                # Get audio duration
+                audio_duration = get_audio_duration(enhanced_audio_path)
+                if audio_duration:
+                    st.info(f"Audio duration: {audio_duration:.2f} seconds")
+                
+                # Create video with appropriate method based on duration
                 success = False
                 
-                # First attempt: Enhanced audio
-                if enhanced:
-                    success = create_video_ffmpeg(temp_img_path, enhanced_audio_path, output_video_path)
-                
-                # Second attempt: Original audio if enhanced failed
-                if not success:
-                    st.warning("Trying with original audio...")
-                    success = create_video_ffmpeg(temp_img_path, temp_audio_path, output_video_path)
-                
-                # Third attempt: Very simple approach
-                if not success:
-                    st.warning("Trying simplified video creation...")
-                    simple_cmd = [
-                        'ffmpeg', '-y', '-loop', '1', '-i', temp_img_path,
-                        '-i', temp_audio_path, '-t', '10',  # Limit to 10 seconds for testing
-                        '-c:v', 'libx264', '-c:a', 'copy', '-shortest', output_video_path
-                    ]
-                    result = subprocess.run(simple_cmd, capture_output=True, text=True, timeout=60)
-                    success = (result.returncode == 0 and os.path.exists(output_video_path))
+                # For long audio, use chunked processing
+                if audio_duration and audio_duration > 600 and chunk_processing:  # 10 minutes
+                    success = create_video_in_chunks(
+                        temp_img_path, 
+                        enhanced_audio_path, 
+                        output_video_path,
+                        chunk_duration=chunk_size * 60  # Convert to seconds
+                    )
+                else:
+                    # For shorter audio, use standard approach with longer timeout
+                    timeout = 600  # 10 minutes
+                    if audio_duration and audio_duration > 300:  # More than 5 minutes
+                        timeout = max(timeout, int(audio_duration * 1.5))
                     
-                    if not success:
-                        st.error(f"Simple approach failed: {result.stderr}")
+                    success = create_video_ffmpeg(
+                        temp_img_path, 
+                        enhanced_audio_path, 
+                        output_video_path,
+                        timeout=timeout
+                    )
+                
+                # Fallback to original audio if enhanced failed
+                if not success and enhanced:
+                    st.warning("Trying with original audio...")
+                    if audio_duration and audio_duration > 600 and chunk_processing:
+                        success = create_video_in_chunks(
+                            temp_img_path, 
+                            temp_audio_path, 
+                            output_video_path,
+                            chunk_duration=chunk_size * 60
+                        )
+                    else:
+                        timeout = 600
+                        if audio_duration and audio_duration > 300:
+                            timeout = max(timeout, int(audio_duration * 1.5))
+                        
+                        success = create_video_ffmpeg(
+                            temp_img_path, 
+                            temp_audio_path, 
+                            output_video_path,
+                            timeout=timeout
+                        )
                 
                 progress_bar.progress(90)
                 
@@ -314,6 +399,7 @@ def main():
     - 🎬 **Video Output**: High-quality MP4 with optimized settings
     - 📱 **Easy Download**: One-click video download
     - ⚡ **Fast Processing**: Direct FFmpeg integration for better performance
+    - ⏰ **Long Audio Support**: Chunked processing for audio of any length
     """)
     
     # Troubleshooting section
@@ -323,7 +409,7 @@ def main():
         - **ModuleNotFoundError**: Make sure all dependencies are installed
         - **FFmpeg not found**: Ensure FFmpeg is installed on your system
         - **Large file issues**: Try using smaller audio/image files
-        - **Processing timeout**: Check your internet connection and file sizes
+        - **Processing timeout**: For very long audio, enable chunked processing
         
         **Deployment on Streamlit Cloud:**
         1. Make sure `packages.txt` contains `ffmpeg`
