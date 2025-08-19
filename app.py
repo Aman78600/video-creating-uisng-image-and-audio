@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 import subprocess
 import sys
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image, ImageEnhance, ImageOps
 import numpy as np
 from io import BytesIO
 import time
@@ -192,7 +192,7 @@ with tab2:
             with st.spinner("Creating video..."):
                 try:
                     # Use enhanced audio if available, otherwise original
-                    final_audio_path = enhanced_audio_path if os.path.exists(enhanced_audio_path) else audio_path
+                    final_audio_path = enhanced_audio_path if 'enhanced_audio_path' in locals() and os.path.exists(enhanced_audio_path) else audio_path
                     
                     # Calculate duration per image
                     audio = AudioSegment.from_file(final_audio_path)
