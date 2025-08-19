@@ -27,49 +27,79 @@ def check_ffmpeg():
 def enhance_audio_basic(audio_file_path, output_path):
     """Basic audio enhancement using ffmpeg"""
     try:
-        # Basic audio enhancement with ffmpeg
+        # Simple but effective audio enhancement
         cmd = [
             'ffmpeg', '-i', audio_file_path,
-            '-af', 'highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11',
+            '-af', 'volume=1.2,highpass=f=60',
+            '-ar', '44100', '-ac', '2',
             '-y', output_path
         ]
         
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        return result.returncode == 0
+        
+        if result.returncode != 0:
+            st.error(f"FFmpeg audio error: {result.stderr}")
+            return False
+        return True
+        
     except Exception as e:
         st.error(f"Audio enhancement failed: {str(e)}")
         return False
 
 def create_video_ffmpeg(image_path, audio_path, output_path):
-    """Create video using ffmpeg directly"""
+    """Create video using ffmpeg directly with better error handling"""
     try:
-        # Get audio duration first
+        # First, try to get audio duration
         duration_cmd = [
-            'ffprobe', '-v', 'quiet', '-show_entries', 
-            'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', 
-            audio_path
+            'ffprobe', '-v', 'error', '-select_streams', 'a:0',
+            '-show_entries', 'format=duration', 
+            '-of', 'csv=p=0', audio_path
         ]
         
         duration_result = subprocess.run(duration_cmd, capture_output=True, text=True, timeout=30)
-        if duration_result.returncode != 0:
-            st.error("Failed to get audio duration")
-            return False
-            
-        duration = float(duration_result.stdout.strip())
         
-        # Create video with ffmpeg
+        if duration_result.returncode != 0:
+            st.warning("Could not determine audio duration, using default approach")
+            duration = None
+        else:
+            try:
+                duration = float(duration_result.stdout.strip())
+                st.info(f"Audio duration: {duration:.2f} seconds")
+            except:
+                duration = None
+        
+        # Simplified video creation command that's more likely to work
         cmd = [
-            'ffmpeg', '-loop', '1', '-i', image_path,
+            'ffmpeg', '-y',
+            '-loop', '1', '-i', image_path,
             '-i', audio_path,
-            '-c:v', 'libx264', '-tune', 'stillimage',
-            '-c:a', 'aac', '-b:a', '192k',
+            '-c:v', 'libx264',
+            '-c:a', 'aac',
+            '-strict', 'experimental',
+            '-b:a', '128k',
             '-pix_fmt', 'yuv420p',
-            '-shortest', '-y', output_path
+            '-shortest',
+            '-movflags', '+faststart',
+            output_path
         ]
         
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        return result.returncode == 0
+        st.info("Running FFmpeg command...")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         
+        if result.returncode == 0:
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                return True
+            else:
+                st.error("Video file was not created or is empty")
+                return False
+        else:
+            st.error(f"FFmpeg failed with return code {result.returncode}")
+            st.error(f"Error output: {result.stderr}")
+            return False
+        
+    except subprocess.TimeoutExpired:
+        st.error("Video creation timed out. Try with a shorter audio file.")
+        return False
     except Exception as e:
         st.error(f"Video creation failed: {str(e)}")
         return False
@@ -153,14 +183,11 @@ def main():
                 # Enhanced audio path
                 enhanced_audio_path = tempfile.mktemp(suffix='.wav')
                 
-                # Try advanced audio enhancement first, fallback to basic
+                # Try audio enhancement with fallback
                 enhanced = enhance_audio_basic(temp_audio_path, enhanced_audio_path)
                 if not enhanced:
-                    enhanced = fallback_audio_enhancement(temp_audio_path, enhanced_audio_path)
-                
-                if not enhanced:
-                    st.error("Failed to enhance audio")
-                    return
+                    st.warning("Audio enhancement failed, using original audio")
+                    enhanced_audio_path = temp_audio_path
                 
                 progress_bar.progress(60)
                 status_text.text("Creating video...")
@@ -168,8 +195,35 @@ def main():
                 # Output video path
                 output_video_path = tempfile.mktemp(suffix='.mp4')
                 
-                # Create video
-                success = create_video_ffmpeg(temp_img_path, enhanced_audio_path, output_video_path)
+                # Debug info
+                st.info(f"Image: {os.path.getsize(temp_img_path)/1024:.1f} KB")
+                st.info(f"Audio: {os.path.getsize(enhanced_audio_path)/1024:.1f} KB")
+                
+                # Create video with multiple attempts
+                success = False
+                
+                # First attempt: Enhanced audio
+                if enhanced:
+                    success = create_video_ffmpeg(temp_img_path, enhanced_audio_path, output_video_path)
+                
+                # Second attempt: Original audio if enhanced failed
+                if not success:
+                    st.warning("Trying with original audio...")
+                    success = create_video_ffmpeg(temp_img_path, temp_audio_path, output_video_path)
+                
+                # Third attempt: Very simple approach
+                if not success:
+                    st.warning("Trying simplified video creation...")
+                    simple_cmd = [
+                        'ffmpeg', '-y', '-loop', '1', '-i', temp_img_path,
+                        '-i', temp_audio_path, '-t', '10',  # Limit to 10 seconds for testing
+                        '-c:v', 'libx264', '-c:a', 'copy', '-shortest', output_video_path
+                    ]
+                    result = subprocess.run(simple_cmd, capture_output=True, text=True, timeout=60)
+                    success = (result.returncode == 0 and os.path.exists(output_video_path))
+                    
+                    if not success:
+                        st.error(f"Simple approach failed: {result.stderr}")
                 
                 progress_bar.progress(90)
                 
