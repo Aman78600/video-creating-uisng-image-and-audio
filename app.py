@@ -47,7 +47,7 @@ def enhance_audio_basic(audio_file_path, output_path):
         return False
 
 def create_video_ffmpeg(image_path, audio_path, output_path):
-    """Create video using ffmpeg directly with better error handling"""
+    """Create video using ffmpeg with proper dimension and codec handling"""
     try:
         # First, try to get audio duration
         duration_cmd = [
@@ -68,22 +68,26 @@ def create_video_ffmpeg(image_path, audio_path, output_path):
             except:
                 duration = None
         
-        # Simplified video creation command that's more likely to work
+        # Fixed command that addresses the issues found in the error log:
+        # 1. Uses video filter to ensure even dimensions
+        # 2. Forces AAC audio codec 
+        # 3. Proper pixel format
         cmd = [
             'ffmpeg', '-y',
             '-loop', '1', '-i', image_path,
             '-i', audio_path,
             '-c:v', 'libx264',
             '-c:a', 'aac',
-            '-strict', 'experimental',
-            '-b:a', '128k',
+            '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',  # Ensure even dimensions
             '-pix_fmt', 'yuv420p',
+            '-ar', '44100',  # Standard audio sample rate
+            '-b:a', '128k',
             '-shortest',
             '-movflags', '+faststart',
             output_path
         ]
         
-        st.info("Running FFmpeg command...")
+        st.info("Running FFmpeg command with dimension fix...")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         
         if result.returncode == 0:
@@ -95,7 +99,31 @@ def create_video_ffmpeg(image_path, audio_path, output_path):
         else:
             st.error(f"FFmpeg failed with return code {result.returncode}")
             st.error(f"Error output: {result.stderr}")
-            return False
+            
+            # Try alternative approach with different scaling
+            st.info("Trying alternative scaling approach...")
+            alt_cmd = [
+                'ffmpeg', '-y',
+                '-loop', '1', '-i', image_path,
+                '-i', audio_path,
+                '-c:v', 'libx264',
+                '-c:a', 'aac',
+                '-vf', 'scale=960:1064',  # Force specific even dimensions
+                '-pix_fmt', 'yuv420p',
+                '-ar', '44100',
+                '-ac', '2',  # Force stereo
+                '-b:a', '128k',
+                '-shortest',
+                output_path
+            ]
+            
+            alt_result = subprocess.run(alt_cmd, capture_output=True, text=True, timeout=180)
+            
+            if alt_result.returncode == 0 and os.path.exists(output_path):
+                return True
+            else:
+                st.error(f"Alternative approach also failed: {alt_result.stderr}")
+                return False
         
     except subprocess.TimeoutExpired:
         st.error("Video creation timed out. Try with a shorter audio file.")
