@@ -2,3 +2,9 @@ streamlit
 moviepy 
 pydub 
 pillow
+imageio 
+imageio-ffmpeg 
+numpy 
+decorator 
+tqdm 
+proglog
